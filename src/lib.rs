@@ -1,13 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet},
-    error::Error,
+    collections::HashSet,
     fs::{File, OpenOptions},
     io,
     ops::{Deref, DerefMut},
-    os::unix::prelude::OpenOptionsExt,
     path::Path,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+
+mod time_indexed_events;
+mod on_disk_time_events;
 
 use bytemuck::{Pod, Zeroable};
 use memmap2::{MmapMut, MmapOptions};
@@ -25,9 +26,15 @@ pub struct DataPage {
     bytes: [u8; PAGE_SIZE],
 }
 
+impl DataPage {
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
 type PID = usize;
 
-struct BufferManager {
+pub struct BufferManager {
     virt_size: usize,
     phys_size: usize,
 
@@ -47,8 +54,8 @@ struct BufferManager {
     io_context: IOContext,
 }
 
-const GB: usize = 1024 * 1024 * 1024;
-const MB: usize = 1024 * 1024;
+pub const GB: usize = 1024 * 1024 * 1024;
+pub const MB: usize = 1024 * 1024;
 const EVICT_BATCH: usize = 32;
 
 impl BufferManager {
@@ -94,7 +101,7 @@ impl BufferManager {
         })
     }
 
-    fn ensure_free_pages(&mut self) -> Result<(), io::Error>{
+    fn ensure_free_pages(&mut self) -> Result<(), io::Error> {
         let phys_used_count = self.phys_used_count.load(Ordering::Relaxed);
         let limit = (self.phys_count as f64 * 0.95).round();
         println!("phys_used_count: {phys_used_count}, limit: {limit}");
@@ -106,34 +113,49 @@ impl BufferManager {
     }
 
     fn evict_pages(&mut self, pages: Vec<PID>) -> Result<(), io::Error> {
-        let mut complete_writes = Vec::with_capacity(pages.len());
+        // FIXME: there are much better ways of doing this but it will do for now
+
+        let mut write_completions = Vec::with_capacity(pages.len());
+        let mut evict_pages = Vec::with_capacity(pages.len());
 
         for pid in pages {
             // take exclusive lock on each page we're evicting
-            if let Some(mut guard) = self.page_slots[pid].lock.try_write() {
+            let slot = &self.page_slots[pid];
+            if let Some(mut guard) = slot.lock.try_write() {
                 let start = pid * PAGE_SIZE;
                 let end = start + PAGE_SIZE;
                 println!("writing page {} to disk at {start}..{end}", pid);
-                {
+                if slot.is_dirty() {
                     let b: &[u8; PAGE_SIZE] = (&self.mmap[start..end]).try_into().unwrap();
                     let comp = self.io_context.write_at(start, b);
-
-
-                    complete_writes.push((start, comp));
+                    // if the page was changed prepare to write it 
+                    write_completions.push(comp);
                 }
-                self.resident_set.remove(&pid);
+                // empty the slot
                 guard.take();
+                // push the page to the evict list
+                evict_pages.push((start, pid, guard));
+                self.resident_set.remove(&pid);
             }
         }
-        let mut evicted_count = 0;
+
         // wait for all the IO to happen
-        for (start, comp) in complete_writes {
+        for comp in write_completions {
             comp.wait()?;
+        }
+
+        let mut evicted_count = 0;
+        // release all the pages from memory
+        for (start, pid, _guard) in evict_pages {
             // tell the OS we're done with this page
-            self.mmap.advise_range(memmap2::Advice::DontNeed, start, PAGE_SIZE)?;
+            self.mmap
+                .advise_range(memmap2::Advice::DontNeed, start, PAGE_SIZE)?;
+            self.page_slots[pid].reset_dirty();
             evicted_count += 1;
         }
-        self.phys_used_count.fetch_sub(evicted_count, Ordering::Relaxed);
+
+        self.phys_used_count
+            .fetch_sub(evicted_count, Ordering::Relaxed);
         Ok(())
     }
 
@@ -168,6 +190,9 @@ impl BufferManager {
         // this is more or less alloc_page but we know what PID we want
         self.load_page(pid)?;
         let write_guard = self.page_slots[pid].lock.write();
+
+        // if we get a mutable page we assume we'll be modifying it
+        self.page_slots[pid].set_dirty();
 
         Ok(PageEntryMut::new(pid, self, write_guard))
     }
@@ -206,6 +231,10 @@ impl BufferManager {
         self.alloc_count.load(Ordering::Relaxed)
     }
 
+    pub fn virt_count(&self) -> usize {
+        self.virt_count
+    }
+
     pub fn phys_used_count(&self) -> usize {
         self.phys_used_count.load(Ordering::Relaxed)
     }
@@ -227,7 +256,7 @@ impl IOContext {
             .read(true)
             .write(true)
             .create(true)
-            .truncate(true)
+            // .truncate(true)
             // .custom_flags(libc::O_DIRECT)
             .open(path)?;
         Ok(Self { ring, file })
@@ -244,12 +273,28 @@ impl IOContext {
 }
 
 struct PageSlot {
+    dirty: AtomicBool,
     lock: parking_lot::RwLock<Option<*mut DataPage>>,
+}
+
+impl PageSlot {
+    fn set_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    fn reset_dirty(&self) {
+        self.dirty.store(false, Ordering::Relaxed);
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed)
+    }
 }
 
 impl Default for PageSlot {
     fn default() -> Self {
         Self {
+            dirty: AtomicBool::new(false),
             lock: RwLock::new(None),
         }
     }
@@ -370,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn bm_modify_3_pages_force_evict_read_pages_and_check_data_is_valid(){
+    fn bm_modify_3_pages_force_evict_read_pages_and_check_data_is_valid() {
         let mut buffer_manager = BufferManager::new(16 * MB, 4 * MB, "/tmp/bm").unwrap();
         {
             let mut page = buffer_manager.get_page_mut(0).unwrap();
@@ -394,7 +439,7 @@ mod tests {
 
         // check phys_used_count
         assert_eq!(buffer_manager.phys_used_count(), 0);
-        
+
         {
             let page = buffer_manager.get_page(0).unwrap();
             for i in 0..PAGE_SIZE {
@@ -414,5 +459,4 @@ mod tests {
             }
         }
     }
-
 }
