@@ -4,7 +4,7 @@ use std::{
     io,
     ops::{Deref, DerefMut},
     path::Path,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering}, marker::PhantomData,
 };
 
 mod time_indexed_events;
@@ -30,6 +30,26 @@ impl DataPage {
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
+
+    pub fn new() -> Self {
+        Self {
+            bytes: [0; PAGE_SIZE],
+        }
+    }
+}
+
+impl Deref for DataPage {
+    type Target = [u8; PAGE_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
+    }
+}
+
+impl DerefMut for DataPage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes
+    }
 }
 
 type PID = usize;
@@ -41,7 +61,7 @@ pub struct BufferManager {
     virt_count: usize,
     phys_count: usize,
 
-    resident_set: HashSet<PID>,
+    resident_set: RwLock<HashSet<PID>>,
 
     mmap: MmapMut,
     pages_ptr: *mut DataPage,
@@ -56,6 +76,7 @@ pub struct BufferManager {
 
 pub const GB: usize = 1024 * 1024 * 1024;
 pub const MB: usize = 1024 * 1024;
+pub const KB: usize = 1024;
 const EVICT_BATCH: usize = 32;
 
 impl BufferManager {
@@ -87,7 +108,7 @@ impl BufferManager {
             virt_count,
             phys_count: phys_size / PAGE_SIZE,
 
-            resident_set: HashSet::new(),
+            resident_set: RwLock::new(HashSet::new()),
 
             mmap,
             pages_ptr,
@@ -101,10 +122,9 @@ impl BufferManager {
         })
     }
 
-    fn ensure_free_pages(&mut self) -> Result<(), io::Error> {
+    fn ensure_free_pages(&self) -> Result<(), io::Error> {
         let phys_used_count = self.phys_used_count.load(Ordering::Relaxed);
         let limit = (self.phys_count as f64 * 0.95).round();
-        println!("phys_used_count: {phys_used_count}, limit: {limit}");
 
         if phys_used_count >= limit as usize {
             self.force_evict()?;
@@ -112,7 +132,7 @@ impl BufferManager {
         Ok(())
     }
 
-    fn evict_pages(&mut self, pages: Vec<PID>) -> Result<(), io::Error> {
+    fn evict_pages(&self, pages: Vec<PID>) -> Result<(), io::Error> {
         // FIXME: there are much better ways of doing this but it will do for now
 
         let mut write_completions = Vec::with_capacity(pages.len());
@@ -135,7 +155,7 @@ impl BufferManager {
                 guard.take();
                 // push the page to the evict list
                 evict_pages.push((start, pid, guard));
-                self.resident_set.remove(&pid);
+                self.resident_set.write().remove(&pid);
             }
         }
 
@@ -159,10 +179,10 @@ impl BufferManager {
         Ok(())
     }
 
-    pub fn force_evict(&mut self) -> Result<(), io::Error> {
+    pub fn force_evict(&self) -> Result<(), io::Error> {
         let mut evicted = 0;
         let mut evict_candidates = Vec::with_capacity(EVICT_BATCH);
-        for pid in self.resident_set.iter() {
+        for pid in self.resident_set.read().iter() {
             // acquire the exclusive lock for this page (means no one else is using it)
             if let Some(_) = self.page_slots[*pid].lock.try_write() {
                 evict_candidates.push(*pid);
@@ -175,8 +195,8 @@ impl BufferManager {
         self.evict_pages(evict_candidates)
     }
 
-    fn alloc_page(&mut self) -> Result<PageEntry<'_>, io::Error> {
-        self.ensure_free_pages();
+    pub fn alloc_page(&mut self) -> Result<PageEntry<'_>, io::Error> {
+        self.ensure_free_pages()?;
         let pid = self.alloc_count.fetch_add(1, Ordering::Relaxed);
         assert!(pid <= self.virt_count);
         self.load_page(pid)?;
@@ -186,7 +206,18 @@ impl BufferManager {
         Ok(PageEntry::new(pid, self, read_guard))
     }
 
-    pub fn get_page_mut(&mut self, pid: PID) -> Result<PageEntryMut<'_>, io::Error> {
+    pub fn alloc_page_mut(&mut self) -> Result<PageEntryMut<'_>, io::Error> {
+        self.ensure_free_pages()?;
+        let pid = self.alloc_count.fetch_add(1, Ordering::Relaxed);
+        assert!(pid <= self.virt_count);
+        self.load_page(pid)?;
+
+        let read_guard = self.page_slots[pid].lock.write();
+
+        Ok(PageEntryMut::new(pid, self, read_guard))
+    }
+
+    pub fn get_page_mut(&self, pid: PID) -> Result<PageEntryMut<'_>, io::Error> {
         // this is more or less alloc_page but we know what PID we want
         self.load_page(pid)?;
         let write_guard = self.page_slots[pid].lock.write();
@@ -197,7 +228,7 @@ impl BufferManager {
         Ok(PageEntryMut::new(pid, self, write_guard))
     }
 
-    pub fn get_page(&mut self, pid: PID) -> Result<PageEntry<'_>, io::Error> {
+    pub fn get_page(&self, pid: PID) -> Result<PageEntry<'_>, io::Error> {
         // this is more or less alloc_page but we know what PID we want
         self.load_page(pid)?;
         let write_guard = self.page_slots[pid].lock.read();
@@ -205,7 +236,7 @@ impl BufferManager {
         Ok(PageEntry::new(pid, self, write_guard))
     }
 
-    fn load_page(&mut self, pid: PID) -> Result<(), io::Error> {
+    fn load_page(&self, pid: PID) -> Result<(), io::Error> {
         self.ensure_free_pages()?;
         let mut slot = self.page_slots[pid].lock.write();
         if slot.is_none() {
@@ -214,15 +245,32 @@ impl BufferManager {
             // we need to read the page from the file into memory
             let start = pid * PAGE_SIZE;
             let end = start + PAGE_SIZE;
-            println!("reading page {} from disk at {start}..{end}", pid);
-            {
-                let b: &mut [u8; PAGE_SIZE] = (&mut self.mmap[start..end]).try_into().unwrap();
-                self.io_context.read_at(start, b)?;
-            }
-            // done loading things into memory now we can cast the page
-            let page = unsafe { self.pages_ptr.add(pid) };
+            let page = unsafe {
+                let data_page_ptr = self.pages_ptr.add(pid);
+                let data_page = &mut *data_page_ptr;
+                self.io_context.read_at(start, data_page.deref_mut())?;
+                data_page_ptr
+            };
+            // println!("reading page {} from disk at {start}..{end}", pid);
+            // {
+            //     // we hold an exclusive lock on the page slot when loading it, hopefully this is okay
+            //     unsafe {
+            //         let mmap_slice = &self.mmap[start..end];
+            //         // decompose mmap_slice into raw parts
+            //         let (ptr, len) = (mmap_slice.as_ptr(), mmap_slice.len());
+            //         // cast ptr as mut
+            //         let ptr = ptr as *mut u8;
+            //         // make a mutable slice from the raw parts
+            //         let slice = std::slice::from_raw_parts_mut(ptr, len);
+
+            //         let b: &mut [u8; PAGE_SIZE] = slice.try_into().unwrap();
+            //         self.io_context.read_at(start, b)?;
+            //     }
+            // }
+            // // done loading things into memory now we can cast the page
+            // let page = unsafe { self.pages_ptr.add(pid) };
             slot.replace(page);
-            self.resident_set.insert(pid);
+            self.resident_set.write().insert(pid);
         }
         Ok(())
     }
@@ -240,7 +288,7 @@ impl BufferManager {
     }
 
     pub fn is_resident(&self, pid: PID) -> bool {
-        self.resident_set.contains(&pid)
+        self.resident_set.read().contains(&pid)
     }
 }
 
@@ -256,7 +304,7 @@ impl IOContext {
             .read(true)
             .write(true)
             .create(true)
-            // .truncate(true)
+            .truncate(true)
             // .custom_flags(libc::O_DIRECT)
             .open(path)?;
         Ok(Self { ring, file })
@@ -355,6 +403,18 @@ impl<'a> PageEntryMut<'a> {
             write_guard,
         }
     }
+
+    fn view_as<A: Pod>(&self) -> &A {
+        bytemuck::cast_ref::<_, A>(&self.bytes)
+    }
+
+    fn view_mut_as<A: Pod>(&mut self) -> &mut A {
+        bytemuck::cast_mut::<_, A>(&mut self.bytes)
+    }
+
+    fn pid(&self) -> PID {
+        self.pid
+    }
 }
 
 impl<'a> PageEntry<'a> {
@@ -368,6 +428,14 @@ impl<'a> PageEntry<'a> {
             bm,
             read_guard,
         }
+    }
+
+    fn view_as<A: Pod>(&self) -> &A {
+        bytemuck::cast_ref::<_, A>(&self.bytes)
+    }
+
+    fn pid(&self) -> PID {
+        self.pid
     }
 }
 
