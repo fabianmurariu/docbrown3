@@ -99,12 +99,13 @@ impl IndexedEvents {
             .map(move |&i| self.cols[i as usize])
     }
 
-    pub fn cols_for_row(&self, row: usize) -> Vec<usize> {
+    pub fn cols_for_row(&self, row: usize) -> Vec<u8> {
         self.index
             .iter()
             .take(self.cap)
             .filter(move |&&i| self.rows[i as usize] == row)
-            .map(|u8| (*u8).into())
+            // .map(|u8| (*u8).into())
+            .copied()
             .collect()
     }
 }

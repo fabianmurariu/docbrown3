@@ -164,7 +164,7 @@ impl IntoIterator for IntoIterEvents {
 
 struct IterEvents {
     bm: Arc<BufferManager>,
-    cols: Vec<usize>,
+    cols: Vec<u8>,
     pid: PID,
     pos: usize,
 }
@@ -177,7 +177,7 @@ impl Iterator for IterEvents {
             let row = self.cols[self.pos];
             let page = self.bm.get_page(self.pid).expect("Failed to get page");
             let events = page.view_as::<IndexedEvents>();
-            let col = events.col_at(row);
+            let col = events.col_at(row.into());
             self.pos += 1;
             Some(col)
         } else {
@@ -190,7 +190,7 @@ impl Iterator for IterEvents {
 mod test {
     use itertools::Itertools;
 
-    use crate::{time_indexed_events::TIME_EVENTS_LEN, KB, MB};
+    use crate::{time_indexed_events::TIME_EVENTS_LEN, KB};
 
     use super::*;
 
