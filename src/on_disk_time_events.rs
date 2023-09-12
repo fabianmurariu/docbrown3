@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ops::DerefMut, path::Path, sync::Arc, array::IntoIter};
+use std::{collections::HashSet, ops::DerefMut, path::Path, sync::Arc};
 
 use rand::Rng;
 
@@ -126,33 +126,63 @@ impl Items {
         })
     }
 
-    pub fn iter(&self, item: usize) -> impl Iterator<Item = IterEvents> + '_ {
-        self.iter_pages(item).map(move |pid| {
-            IterEvents {
-                events: self.bm.clone(),
-                item,
-                pid,
-            }
+    pub fn iter(&self, item: usize) -> impl Iterator<Item = i64> + '_ {
+        self.iter_pages(item).flat_map(move |pid| IntoIterEvents {
+            bm: self.bm.clone(),
+            item,
+            pid,
         })
     }
 }
 
-struct IterEvents {
-    events: Arc<BufferManager>,
+struct IntoIterEvents {
+    bm: Arc<BufferManager>,
     item: usize,
     pid: PID,
 }
 
-impl IntoIterator for IterEvents{
-    type Item = (usize, i64);
-    type IntoIter = Box<dyn Iterator<Item = (usize, i64)>>;
+impl IntoIterator for IntoIterEvents {
+    type Item = i64;
+    type IntoIter = IterEvents;
 
     fn into_iter(self) -> Self::IntoIter {
-        let page = self.events.get_page(self.pid).expect("Failed to get page");
-        let events = page.view_as::<IndexedEvents>();
-        let item = self.item;
-        let iter = events.timestamps_for_row(self.pid).map(move |col| (item, col));
-        Box::new(iter)
+        let cols = {
+            let page = self.bm.get_page(self.pid).expect("Failed to get page");
+            let events = page.view_as::<IndexedEvents>();
+            let item = self.item;
+            let iter = events.cols_for_row(item);
+            iter
+        };
+        IterEvents {
+            bm: self.bm,
+            cols: cols,
+            pid: self.pid,
+            pos: 0,
+        }
+    }
+}
+
+struct IterEvents {
+    bm: Arc<BufferManager>,
+    cols: Vec<usize>,
+    pid: PID,
+    pos: usize,
+}
+
+impl Iterator for IterEvents {
+    type Item = i64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.cols.len() {
+            let row = self.cols[self.pos];
+            let page = self.bm.get_page(self.pid).expect("Failed to get page");
+            let events = page.view_as::<IndexedEvents>();
+            let col = events.col_at(row);
+            self.pos += 1;
+            Some(col)
+        } else {
+            None
+        }
     }
 }
 
@@ -214,5 +244,44 @@ mod test {
             assert_eq!(&pages[0], &1);
             assert!(&pages[1] >= &2);
         }
+    }
+
+    #[test]
+    fn take_2_items_and_append_timestamps() {
+        let _ = std::fs::remove_file("items2.bm");
+        let mut items = Items::new("items2.bm", 12 * KB, 32 * KB);
+        assert_eq!(items.num_item_buckets, 2);
+
+        let mut rng = rand::thread_rng();
+
+        let events = (0..(4 * TIME_EVENTS_LEN))
+            .into_iter()
+            .map(|_| {
+                // pick one of the items at random
+                let item: usize = rng.gen_range(0..=1);
+                // pick a timestamp at random
+                let timestamp = rng.gen_range(-100 .. 100);
+                (item, timestamp)
+            })
+            .collect_vec();
+
+        for (row, col) in &events {
+            assert!(items.append(*row, *col));
+        }
+
+        let mut actual = items.iter(0).collect_vec();
+
+        let mut expected = events
+            .iter()
+            .filter(|(row, _)| *row == 0)
+            .map(|(_, col)| *col)
+            .collect_vec();
+
+        expected.sort();
+        actual.sort();
+
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(actual, expected)
+
     }
 }

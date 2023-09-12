@@ -11,7 +11,7 @@ pub const TIME_EVENTS_LEN: usize =
 // this is an append log of rows at cols that are sorted by (rows, cols) in the index field
 // on every insertion, the index is updated to reflect the new order
 // this is in essence graph like thing with u0 -> [u0, u1, u2] u1 -> [u9, u8], u2 -> [u7, u6, u5, u4, u3]
-#[repr(C,align(4096))]
+#[repr(C, align(4096))]
 #[derive(Pod, Zeroable, Copy, Clone, Debug)]
 pub struct IndexedEvents {
     overflow: usize, // address where the overflow page is
@@ -23,12 +23,20 @@ pub struct IndexedEvents {
 
 impl IndexedEvents {
 
+    pub fn pair_at(&self, pos: usize) -> (usize, i64) {
+        (self.rows[pos], self.cols[pos])
+    }
+
+    pub fn col_at(&self, index_pos: usize) -> i64 {
+        self.cols[index_pos]
+    }
     pub fn capacity(&self) -> usize {
         self.cap
     }
 
     pub fn overflow_page(&self) -> Option<usize> {
-        if self.overflow == 0 { // the first page can't be an overflow
+        if self.overflow == 0 {
+            // the first page can't be an overflow
             None
         } else {
             Some(self.overflow)
@@ -83,22 +91,34 @@ impl IndexedEvents {
             .map(move |&i| (self.rows[i as usize], self.cols[i as usize]))
     }
 
-    pub fn timestamps_for_row(&self, row: usize) -> impl Iterator<Item = i64> + '_ {
+    pub fn cols_for_row_iter(&self, row: usize) -> impl Iterator<Item = i64> + '_ {
         self.index
             .iter()
             .take(self.cap)
             .filter(move |&&i| self.rows[i as usize] == row)
             .map(move |&i| self.cols[i as usize])
     }
+
+    pub fn cols_for_row(&self, row: usize) -> Vec<usize> {
+        self.index
+            .iter()
+            .take(self.cap)
+            .filter(move |&&i| self.rows[i as usize] == row)
+            .map(|u8| (*u8).into())
+            .collect()
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use std::{mem::{size_of, align_of}, ops::DerefMut};
+    use std::{
+        mem::{align_of, size_of},
+        ops::DerefMut,
+    };
 
     use bytemuck::Zeroable;
 
-    use crate::{time_indexed_events::IndexedEvents, PAGE_SIZE, DataPage};
+    use crate::{time_indexed_events::IndexedEvents, DataPage, PAGE_SIZE};
 
     #[test]
     fn what_size_am_i() {
@@ -125,7 +145,7 @@ mod test {
         assert_eq!(iter.next(), Some((1, 1)));
         assert_eq!(iter.next(), None);
 
-        let mut iter = events.timestamps_for_row(1);
+        let mut iter = events.cols_for_row_iter(1);
         assert_eq!(iter.next(), Some(1));
         assert_eq!(iter.next(), None);
     }
@@ -150,11 +170,11 @@ mod test {
         assert_eq!(iter.next(), Some((2, 1)));
         assert_eq!(iter.next(), None);
 
-        let mut iter = events.timestamps_for_row(1);
+        let mut iter = events.cols_for_row_iter(1);
         assert_eq!(iter.next(), Some(1));
         assert_eq!(iter.next(), None);
 
-        let mut iter = events.timestamps_for_row(2);
+        let mut iter = events.cols_for_row_iter(2);
         assert_eq!(iter.next(), Some(1));
         assert_eq!(iter.next(), None);
     }
@@ -171,10 +191,10 @@ mod test {
         let actual = events.iter().collect::<Vec<_>>();
         assert_eq!(actual, vec![(1, 1), (1, 2), (2, 1), (2, 2)]);
 
-        let actual = events.timestamps_for_row(1).collect::<Vec<_>>();
+        let actual = events.cols_for_row_iter(1).collect::<Vec<_>>();
         assert_eq!(actual, vec![1, 2]);
 
-        let actual = events.timestamps_for_row(2).collect::<Vec<_>>();
+        let actual = events.cols_for_row_iter(2).collect::<Vec<_>>();
         assert_eq!(actual, vec![1, 2]);
     }
 }

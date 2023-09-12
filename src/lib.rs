@@ -251,24 +251,6 @@ impl BufferManager {
                 self.io_context.read_at(start, data_page.deref_mut())?;
                 data_page_ptr
             };
-            // println!("reading page {} from disk at {start}..{end}", pid);
-            // {
-            //     // we hold an exclusive lock on the page slot when loading it, hopefully this is okay
-            //     unsafe {
-            //         let mmap_slice = &self.mmap[start..end];
-            //         // decompose mmap_slice into raw parts
-            //         let (ptr, len) = (mmap_slice.as_ptr(), mmap_slice.len());
-            //         // cast ptr as mut
-            //         let ptr = ptr as *mut u8;
-            //         // make a mutable slice from the raw parts
-            //         let slice = std::slice::from_raw_parts_mut(ptr, len);
-
-            //         let b: &mut [u8; PAGE_SIZE] = slice.try_into().unwrap();
-            //         self.io_context.read_at(start, b)?;
-            //     }
-            // }
-            // // done loading things into memory now we can cast the page
-            // let page = unsafe { self.pages_ptr.add(pid) };
             slot.replace(page);
             self.resident_set.write().insert(pid);
         }
