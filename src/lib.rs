@@ -9,6 +9,7 @@ use std::{
 
 mod time_indexed_events;
 mod on_disk_time_events;
+mod arrow;
 
 use bytemuck::{Pod, Zeroable};
 use memmap2::{MmapMut, MmapOptions};
