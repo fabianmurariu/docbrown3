@@ -44,7 +44,12 @@ impl<'a> From<&'a StructArray> for EdgePair<'a> {
     }
 }
 
-impl<'a> EdgePair<'a> {
+impl <'a> EdgePair<'a> {
+    pub fn from_arr(arr: Box<dyn Array>) -> Option<Self> {
+        let a = arr.as_any().downcast_ref::<StructArray>()?;
+        Some(Self::from(a))
+    }
+
     fn vs(&self) -> &'a PrimitiveArray<u64> {
         self.0.values()[0]
             .as_any()
@@ -57,6 +62,10 @@ impl<'a> EdgePair<'a> {
             .as_any()
             .downcast_ref::<PrimitiveArray<u64>>()
             .unwrap()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&u64, &u64)> + '_ {
+        self.vs().into_iter().flatten().zip(self.es().into_iter().flatten())
     }
 }
 
@@ -224,7 +233,6 @@ impl GraphFragment {
             other.items.values().iter().copied(),
         );
 
-
         // need the same stuff as from_sorted_triplets
 
         // let lists = row_indicators.iter().map(|indicator| {
@@ -259,7 +267,8 @@ impl GraphFragment {
         for indicator in row_indicators.iter() {
             if *indicator {
                 let next_item = self_items.next().flatten().copied();
-                if other_items.peek().is_some() && other_items.peek().unwrap().copied() == next_item {
+                if other_items.peek().is_some() && other_items.peek().unwrap().copied() == next_item
+                {
                     let next_other_out = other_out.next().flatten();
                     let next_self_out = self_out.next().flatten();
                     println!("merge lists for {:?}", next_item);
@@ -277,6 +286,26 @@ impl GraphFragment {
         // it has the same value then we can merge the two lists
 
         todo!("items, outbound and inbound columns")
+    }
+
+    fn merge_lists(
+        left: Option<Box<dyn Array>>,
+        right: Option<Box<dyn Array>>,
+        into: &mut MutableListArray<i32, MutableStructArray>,
+    ) -> Option<()> {
+        let lhs = EdgePair::from_arr(left?)?;
+        let rhs = EdgePair::from_arr(right?)?;
+
+        let pairs = lhs.iter().merge_by(rhs.iter(), |(v1, _), (v2, _)| v1 < v2).dedup();
+
+        let mut row: MutEdgePair = into.mut_values().into();
+
+        for (v, e) in pairs {
+            row.add_pair(*v, *e);
+        }
+        into.try_push_valid().expect("push valid");
+
+        Some(())
     }
 }
 
