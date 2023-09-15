@@ -311,8 +311,6 @@ impl GraphFragment {
     }
 
     pub fn merge(&self, other: &GraphFragment) -> GraphFragment {
-        // print lengths
-        println!("self: {}, other: {}", self.len(), other.len());
         if other.len() == 0 {
             return self.clone();
         }
@@ -458,10 +456,10 @@ mod test {
 
             let actual = csr1.merge(&csr2);
 
-            let inbound_iter:Box<dyn Iterator<Item = &(u64, u64, u64)>> = Box::new(inbound_g1.iter().merge_by(inbound_g2.iter(), |(v1,_,_),(v2,_,_)|v1<v2).dedup());
-            let outbound_iter = Box::new(outbound_g1.iter().merge_by(outbound_g2.iter(), |(v1,_,_),(v2,_,_)|v1<v2).dedup());
+            let inbound_iter = Box::new(inbound_g1.iter().merge_by(inbound_g2.iter(), |(v1,_,_),(v2,_,_)|v1<v2).dedup());
+            let outbound_iter:Box<dyn Iterator<Item = &(u64, u64, u64)>> = Box::new(outbound_g1.iter().merge_by(outbound_g2.iter(), |(v1,_,_),(v2,_,_)|v1<v2).dedup());
 
-            let expected = GraphFragment::from_sorted_triplets(inbound_iter, outbound_iter);
+            let expected = GraphFragment::from_sorted_triplets(outbound_iter, inbound_iter);
 
             assert_eq!(actual, expected)
 
@@ -529,12 +527,56 @@ mod test {
     }
 
     #[test]
+    fn merge_graph_fragments_1_vertex_outbound_from_2nd() {
+        let csr1 = GraphFragment::from_sorted_triplets([].iter(), [].iter());
+        let csr2 = GraphFragment::from_sorted_triplets([(0, 0, 0)].iter(), [].iter());
+
+        let expected = GraphFragment::from_sorted_triplets([(0, 0, 0)].iter(), [].iter());
+
+        let actual = csr1.merge(&csr2);
+
+        assert_eq!(actual, expected)
+    }
+
+    #[test]
     fn merge_graph_fragments_1_vertex_both_lists() {
         let csr1 = GraphFragment::from_sorted_triplets([(1, 2, 0)].iter(), [(1, 9, 2)].iter());
         let csr2 = GraphFragment::from_sorted_triplets([(1, 3, 1)].iter(), [(1, 13, 4)].iter());
 
         let expected = GraphFragment::from_sorted_triplets(
             [(1, 2, 0), (1, 3, 1)].iter(),
+            [(1, 9, 2), (1, 13, 4)].iter(),
+        );
+
+        let actual = csr1.merge(&csr2);
+
+        assert_eq!(actual, expected)
+    }
+
+    #[test]
+    fn merge_graph_fragments_2_vertices_both_lists_not_overlapping() {
+        let csr1 = GraphFragment::from_sorted_triplets([(1, 2, 0)].iter(), [(1, 9, 2)].iter());
+        let csr2 = GraphFragment::from_sorted_triplets([(2, 3, 1)].iter(), [(2, 13, 4)].iter());
+
+        let expected = GraphFragment::from_sorted_triplets(
+            [(1, 2, 0), (2, 3, 1)].iter(),
+            [(1, 9, 2), (2, 13, 4)].iter(),
+        );
+
+        let actual = csr1.merge(&csr2);
+
+        assert_eq!(actual, expected)
+    }
+
+    #[test]
+    fn merge_graph_fragments_2_vertices_both_lists_overlapping() {
+        let csr1 =
+            GraphFragment::from_sorted_triplets([(1, 2, 0), (1, 3, 1)].iter(), [(1, 9, 2)].iter());
+        let csr2 =
+            GraphFragment::from_sorted_triplets([(1, 3, 1), (2, 7, 3)].iter(), [(1, 13, 4)].iter());
+
+        let expected = GraphFragment::from_sorted_triplets(
+            [(1, 2, 0), (1, 3, 1), (2, 7, 3)].iter(),
             [(1, 9, 2), (1, 13, 4)].iter(),
         );
 
