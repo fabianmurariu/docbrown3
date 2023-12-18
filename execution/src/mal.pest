@@ -1,0 +1,60 @@
+forms = { form* }
+
+form = { special_form | literal | vector }
+
+special_form = { fn | if | let | loop | recur | struct | call}
+
+fn = { "(" ~ "fn" ~ params ~ forms ~ ")" }
+
+if = { "(" ~ "if" ~ form ~ form ~ form? ~ ")" }
+
+let = { "(" ~ "let" ~ bindings ~ forms ~ ")" }
+
+loop = { "(" ~ "loop" ~ symbol? ~ bindings ~ forms ~ ")" }
+
+struct = { "(" ~ "struct" ~ (symbol ~ type)+ ~ ")" }
+
+call = { "(" ~ symbol ~ forms ~ ")" }
+
+recur = { "(" ~ "recur" ~ forms ~ ")" }
+
+// list = { !special_form ~ "(" ~ forms ~ ")" }
+
+vector = { "[" ~ forms ~ "]" }
+
+// map = { "{" ~ (form ~ form)* ~ "}" }
+
+// set = { "#{" ~ forms ~ "}" }
+
+params = { "[" ~ (type ~ symbol)* ~ "]" }
+
+type = { native_type | product_type }
+
+product_type = { "[" ~ type ~ (type)* ~ "]" }
+
+native_type = { "i32" | "i64" | "f32" | "f64" | "u32" | "u64" | "string" | "boolean" }
+
+bindings = { "[" ~ (symbol ~ form)* ~ "]" }
+
+symbol = @{ (ASCII_ALPHA | "+" | "-" | "/" | "*" ) ~ (ASCII_ALPHANUMERIC | "-" | "_" | "?" | "!")* }
+
+literal = { string | number | boolean }
+
+number = _{ i32 | i64 | f32 | f64 | u32 | u64 }
+
+i32 = @{ ASCII_DIGIT+ ~ "i32" }
+i64 = @{ ASCII_DIGIT+ ~ "i64" }
+f32 = @{ float ~ "f32" }
+f64 = @{ float ~ "f64" }
+u32 = @{ ASCII_DIGIT+ ~ "u32" }
+u64 = @{ ASCII_DIGIT+ ~ "u64" }
+
+float = @{
+    "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT*)? ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+}
+
+string = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+boolean = { "true" | "false" }
+
+WHITESPACE = _{ " " }
